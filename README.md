@@ -85,6 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\restore.ps1
 ## 安全说明
 
 - 不联网上传任何数据；只在安装时从 npm 下载语言包
+- **版本锁定 + 完整性校验**：默认固定 `@polang233/cursor-language-pack@1.2.0`，拒绝未固定版本；下载的 tarball 必须匹配已知 SHA-512，不匹配立即中止，不会执行任何代码
 - 不安装系统服务、不设置开机启动、不修改系统环境
 - 只修改 Cursor 安装目录内的 bundle 与 `product.json`，均有备份可还原
 - **依赖第三方项目**：`polang233/cursor-language-pack`（MIT），非 Cursor 官方支持
