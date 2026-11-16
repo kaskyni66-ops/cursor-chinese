@@ -1,13 +1,19 @@
 # ASCII only. Apply the Cursor language pack (bundle translation + switching extension).
-# Supply-chain safety: the package version is pinned and the tarball is verified
-# against a known SHA-512 before any of its code runs.
+# Safety properties:
+#   - the package version is pinned and the tarball is hashed on every run
+#   - code is executed only from a tree extracted during this run
+#   - Cursor is closed ONLY after the package has been verified, so a network or
+#     integrity failure never interrupts a running session
+#   - every modified file is backed up by the upstream installer and can be
+#     restored with restore.ps1
 param(
   [string]$Locale = 'zh-cn',
   [string]$CursorDir = '',
   [string]$CacheDir = 'D:\Tools\cursor-chinese\cache',
   [string]$Package = '@polang233/cursor-language-pack@1.2.0',
   [string]$ExpectedIntegrity = 'sha512-qTJNW44qwKMmQeqRcWGdVzF6e2CKte6BF1Rxt94jeRi9ZHe/WHsWPSDru6DExcvWrby7iFlIn69kzJkCQrtleg==',
-  [switch]$NoRelaunch
+  [switch]$NoRelaunch,
+  [switch]$VerifyOnly
 )
 
 $ErrorActionPreference = 'Continue'
@@ -23,7 +29,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
   Fail 'refusing an unpinned package spec; pass an exact version such as @polang233/cursor-language-pack@1.2.0'
 }
 
-# ---------- 1. locate Cursor ----------
+# ---------- 1. locate Cursor (read-only) ----------
 Step 'locating Cursor'
 if (-not $CursorDir) {
   foreach ($c in @('E:\Cursor', "$env:LOCALAPPDATA\Programs\cursor", 'C:\Program Files\Cursor', 'D:\Cursor')) {
@@ -34,56 +40,82 @@ if (-not $CursorDir -or -not (Test-Path (Join-Path $CursorDir 'resources\app\pro
   Fail 'Cursor install not found; pass -CursorDir'
 }
 Ok ('Cursor at ' + $CursorDir)
+$curVer = (Get-Content (Join-Path $CursorDir 'resources\app\product.json') -Raw | ConvertFrom-Json).version
+Ok ('Cursor version ' + $curVer)
 
-# ---------- 2. close Cursor ----------
+# ---------- 2. fetch, verify, extract fresh (read-only to Cursor) ----------
+Step ('fetching ' + $Package)
+$stage = Join-Path $CacheDir $version
+if (-not (Test-Path $stage)) { New-Item -ItemType Directory -Force -Path $stage | Out-Null }
+
+$tgz = Get-ChildItem $stage -Filter '*.tgz' -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $tgz) {
+  Push-Location $stage
+  # options must come BEFORE '--'; everything after it is a package spec
+  $packOut = & npm pack --pack-destination $stage -- $Package 2>&1
+  Pop-Location
+  $tgz = Get-ChildItem $stage -Filter '*.tgz' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $tgz) { Fail ('npm pack failed: ' + (($packOut | ForEach-Object { $_.ToString() }) -join ' ')) }
+}
+
+$hashAlg = [Security.Cryptography.SHA512]::Create()
+$actual = 'sha512-' + [Convert]::ToBase64String($hashAlg.ComputeHash([IO.File]::ReadAllBytes($tgz.FullName)))
+if ($actual -ne $ExpectedIntegrity) {
+  Fail ('integrity mismatch; refusing to run. expected=' + $ExpectedIntegrity + ' actual=' + $actual)
+}
+Ok ('tarball integrity verified: ' + $tgz.Name)
+
+$runDir = Join-Path $stage ('run-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+
+# Extract with npm rather than tar: the tar shipped with Git/MSYS mis-parses
+# Windows paths ("Cannot connect to D:"). npm installs from the already-verified
+# local tarball and runs no scripts.
+$installOut = & npm install --prefix $runDir --no-save --ignore-scripts --no-audit --no-fund $tgz.FullName 2>&1
+if ($LASTEXITCODE -ne 0) {
+  Fail ('extraction failed (npm exit=' + $LASTEXITCODE + '): ' + (($installOut | ForEach-Object { $_.ToString() }) -join ' '))
+}
+$pkgDir = $null
+$nm = Join-Path $runDir 'node_modules'
+if (Test-Path $nm) {
+  $found = Get-ChildItem $nm -Recurse -Directory -Filter 'cursor-language-pack' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($found) { $pkgDir = $found.FullName }
+}
+if (-not $pkgDir -or -not (Test-Path (Join-Path $pkgDir 'package.json'))) { Fail 'package extraction failed' }
+Ok ('extracted into a fresh directory for this run: ' + $pkgDir)
+
+# ---------- 3. version compatibility (read-only) ----------
+Step 'checking version compatibility'
+$cfgText = Get-Content (Join-Path $pkgDir 'config.json') -Raw
+$verifiedList = @()
+try {
+  $cfg = $cfgText | ConvertFrom-Json
+  $verifiedList = @($cfg.target.verifiedCursorVersions)
+} catch {
+  # config.json is JSONC (contains comments); fall back to a narrow regex read
+  $m = [regex]::Match($cfgText, '"verifiedCursorVersions"\s*:\s*\[([^\]]*)\]')
+  if ($m.Success) {
+    $verifiedList = @([regex]::Matches($m.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+  }
+}
+if ($verifiedList -contains $curVer) { Ok ('Cursor ' + $curVer + ' is in verified list') }
+else { Write-Host ('[WARN] Cursor ' + $curVer + ' not in verified list: ' + ($verifiedList -join ', ')) }
+
+if ($VerifyOnly) {
+  Ok ('verify-only complete; package at ' + $pkgDir)
+  Write-Host '[INFO] Cursor was not touched.'
+  exit 0
+}
+
+# ---------- 4. close Cursor (only now that everything is verified) ----------
 Step 'closing Cursor'
 Get-Process -Name Cursor -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 8
 $alive = @(Get-Process -Name Cursor -ErrorAction SilentlyContinue).Count
 if ($alive -gt 0) { Fail ('Cursor still running (' + $alive + ' processes)') }
 Ok 'Cursor closed'
-
-# ---------- 3. fetch and verify package ----------
-Step ('fetching ' + $Package)
-$stage = Join-Path $CacheDir $version
-$marker = Join-Path $stage 'verified-integrity.txt'
-$pkgDir = Join-Path $stage 'package'
-
-$verified = (Test-Path (Join-Path $pkgDir 'package.json')) -and
-            (Test-Path $marker) -and
-            ((Get-Content $marker -Raw).Trim() -eq $ExpectedIntegrity)
-
-if ($verified) {
-  Ok 'cached copy already verified'
-} else {
-  if (-not (Test-Path $stage)) { New-Item -ItemType Directory -Force -Path $stage | Out-Null }
-  Push-Location $stage
-  # '--' stops npm from parsing the spec as an option
-  $packOut = & npm pack -- $Package --pack-destination $stage 2>&1
-  Pop-Location
-  $tgz = Get-ChildItem $stage -Filter '*.tgz' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $tgz) { Fail ('npm pack failed: ' + ($packOut -join ' ')) }
-
-  $sha = [Security.Cryptography.SHA512]::Create()
-  $b64 = [Convert]::ToBase64String($sha.ComputeHash([IO.File]::ReadAllBytes($tgz.FullName)))
-  $actual = 'sha512-' + $b64
-  if ($actual -ne $ExpectedIntegrity) {
-    Fail ('integrity mismatch; refusing to run. expected=' + $ExpectedIntegrity + ' actual=' + $actual)
-  }
-  Ok 'tarball integrity verified'
-
-  & tar -xzf $tgz.FullName -C $stage 2>&1 | Out-Null
-  if (-not (Test-Path (Join-Path $pkgDir 'package.json'))) { Fail 'package extraction failed' }
-  [IO.File]::WriteAllText($marker, $ExpectedIntegrity, (New-Object Text.UTF8Encoding($false)))
-}
-
-# ---------- 4. version compatibility ----------
-Step 'checking version compatibility'
-$cfg = Get-Content (Join-Path $pkgDir 'config.json') -Raw | ConvertFrom-Json
-$curVer = (Get-Content (Join-Path $CursorDir 'resources\app\product.json') -Raw | ConvertFrom-Json).version
-$verifiedList = @($cfg.target.verifiedCursorVersions)
-if ($verifiedList -contains $curVer) { Ok ('Cursor ' + $curVer + ' is in verified list') }
-else { Write-Host ('[WARN] Cursor ' + $curVer + ' not in verified list: ' + ($verifiedList -join ', ')) }
 
 # ---------- 5. remove conflicting official pack ----------
 Step 'removing conflicting official language pack'
@@ -126,7 +158,7 @@ Write-Host ('   locale_set=' + $locOk)
 Write-Host ('   backup_files=' + $bkCount)
 
 if ($packOk -and $locOk -and $bkCount -ge 3) { Ok 'translation applied' }
-else { Fail ('verification failed (installer exit=' + $code + ')') }
+else { Fail ('verification failed (installer exit=' + $code + '). Run restore.ps1 to roll back.') }
 
 # ---------- 8. relaunch ----------
 if ($NoRelaunch) {
@@ -138,4 +170,4 @@ if ($NoRelaunch) {
   Ok ('Cursor processes: ' + @(Get-Process -Name Cursor -ErrorAction SilentlyContinue).Count)
 }
 Write-Host ''
-Write-Host 'Done. If the UI is still English, run restore.ps1 then apply.ps1 again.'
+Write-Host 'Done. Roll back any time with restore.ps1.'
