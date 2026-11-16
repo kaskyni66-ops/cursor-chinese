@@ -1,0 +1,10 @@
+# package archives and caches
+*.tgz
+cache/
+node_modules/
+
+# logs and temp output
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
