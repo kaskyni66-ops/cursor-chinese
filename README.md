@@ -66,7 +66,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 
 判定依据（不靠截图）：扩展已安装、`argv.json` 的 `locale` 正确、备份文件 ≥ 3 个。
 
-### 4. 回滚
+### 4. 开启自动维护（推荐）
+
+Cursor 每次自动更新都会把界面变回英文。装一次自动维护，之后无需人工干预：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-autostart.ps1 -Locale zh-cn
+```
+
+注意：注册计划任务需要**管理员权限**，请在提权后的 PowerShell 里执行。
+
+它注册的任务 `Cursor Chinese Auto` 会在**每次登录后 2 分钟**和**每天 12:00** 检查一次：
+
+| 情况 | 行为 |
+|---|---|
+| 已是最新且翻译完好 | 什么都不做 |
+| Cursor 版本变了 | 自动重新汉化 |
+| **Cursor 正在运行** | **本轮跳过**，绝不影响你正在用的窗口 |
+| 翻译被破坏（备份缺失等） | 自动修复 |
+
+日志：`D:\Tools\cursor-chinese\cache\logs\auto-watch.log`
+
+卸载：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-autostart.ps1 -Uninstall
+```
+
+### 5. 回滚
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\restore.ps1

@@ -6,7 +6,8 @@ param(
   [string]$CursorDir = '',
   [string]$CacheDir = 'D:\Tools\cursor-chinese\cache',
   [string]$Package = '@polang233/cursor-language-pack@1.2.0',
-  [string]$ExpectedIntegrity = 'sha512-qTJNW44qwKMmQeqRcWGdVzF6e2CKte6BF1Rxt94jeRi9ZHe/WHsWPSDru6DExcvWrby7iFlIn69kzJkCQrtleg=='
+  [string]$ExpectedIntegrity = 'sha512-qTJNW44qwKMmQeqRcWGdVzF6e2CKte6BF1Rxt94jeRi9ZHe/WHsWPSDru6DExcvWrby7iFlIn69kzJkCQrtleg==',
+  [switch]$NoRelaunch
 )
 
 $ErrorActionPreference = 'Continue'
@@ -128,9 +129,13 @@ if ($packOk -and $locOk -and $bkCount -ge 3) { Ok 'translation applied' }
 else { Fail ('verification failed (installer exit=' + $code + ')') }
 
 # ---------- 8. relaunch ----------
-Step 'starting Cursor'
-Start-Process -FilePath (Join-Path $CursorDir 'Cursor.exe') -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 20
-Ok ('Cursor processes: ' + @(Get-Process -Name Cursor -ErrorAction SilentlyContinue).Count)
+if ($NoRelaunch) {
+  Ok 'NoRelaunch set; Cursor not started'
+} else {
+  Step 'starting Cursor'
+  Start-Process -FilePath (Join-Path $CursorDir 'Cursor.exe') -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 20
+  Ok ('Cursor processes: ' + @(Get-Process -Name Cursor -ErrorAction SilentlyContinue).Count)
+}
 Write-Host ''
 Write-Host 'Done. If the UI is still English, run restore.ps1 then apply.ps1 again.'

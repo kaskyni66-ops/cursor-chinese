@@ -89,6 +89,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill>\scripts\restore.ps1
 | `ja` | 日语 |
 | `en` | 英文（等同回滚显示语言） |
 
+## 自动维护（安装后无需人工干预）
+
+Skill 的用户不一定有 AI 盯着，所以提供一次性的自动化安装：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill>\scripts\install-autostart.ps1" -Locale zh-cn
+```
+
+它注册计划任务 `Cursor Chinese Auto`：
+
+| 触发时机 | 原因 |
+|---|---|
+| 每次登录后 2 分钟 | Cursor 更新通常在重启时生效，此时 Cursor 还没启动 |
+| 每天 12:00 | 机器长时间不关时兜底检查 |
+
+判定逻辑（`scripts/auto-watch.ps1`）：
+
+1. 读取当前 Cursor 版本、扩展、locale、备份数量
+2. 与 `state.json` 记录的上次版本比对
+3. 三者都健康且版本未变 → 什么都不做
+4. **Cursor 正在运行 → 本轮跳过并记日志**，绝不强制关闭用户正在用的窗口
+5. 需要处理且 Cursor 未运行 → 调用 `apply.ps1 -NoRelaunch`，成功后更新 `state.json`
+
+日志：`<CacheDir>\logs\auto-watch.log`
+
+卸载自动化：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "<skill>\scripts\install-autostart.ps1" -Uninstall
+```
+
+> 注册计划任务需要管理员权限（普通权限会报 Access denied）；脚本会自动提示用提权窗口执行。
+
 ## 故障排查
 
 | 现象 | 原因 | 处理 |
