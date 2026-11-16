@@ -1,9 +1,12 @@
 # ASCII only. Apply the Cursor language pack (bundle translation + switching extension).
+# Supply-chain safety: the package version is pinned and the tarball is verified
+# against a known SHA-512 before any of its code runs.
 param(
   [string]$Locale = 'zh-cn',
   [string]$CursorDir = '',
   [string]$CacheDir = 'D:\Tools\cursor-chinese\cache',
-  [string]$Package = '@polang233/cursor-language-pack@latest'
+  [string]$Package = '@polang233/cursor-language-pack@1.2.0',
+  [string]$ExpectedIntegrity = 'sha512-qTJNW44qwKMmQeqRcWGdVzF6e2CKte6BF1Rxt94jeRi9ZHe/WHsWPSDru6DExcvWrby7iFlIn69kzJkCQrtleg=='
 )
 
 $ErrorActionPreference = 'Continue'
@@ -13,6 +16,11 @@ $env:ELECTRON_RUN_AS_NODE = $null
 function Fail($msg) { Write-Host ('[FAIL] ' + $msg); exit 1 }
 function Step($msg) { Write-Host ('[STEP] ' + $msg) }
 function Ok($msg)   { Write-Host ('[OK]   ' + $msg) }
+
+$version = ($Package -split '@')[-1]
+if ($version -notmatch '^\d+\.\d+\.\d+$') {
+  Fail 'refusing an unpinned package spec; pass an exact version such as @polang233/cursor-language-pack@1.2.0'
+}
 
 # ---------- 1. locate Cursor ----------
 Step 'locating Cursor'
@@ -26,7 +34,7 @@ if (-not $CursorDir -or -not (Test-Path (Join-Path $CursorDir 'resources\app\pro
 }
 Ok ('Cursor at ' + $CursorDir)
 
-# ---------- 2. font: quit Cursor ----------
+# ---------- 2. close Cursor ----------
 Step 'closing Cursor'
 Get-Process -Name Cursor -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 8
@@ -34,31 +42,47 @@ $alive = @(Get-Process -Name Cursor -ErrorAction SilentlyContinue).Count
 if ($alive -gt 0) { Fail ('Cursor still running (' + $alive + ' processes)') }
 Ok 'Cursor closed'
 
-# ---------- 3. fetch package ----------
-Step 'fetching language pack'
-if (-not (Test-Path $CacheDir)) { New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null }
-$pkgJson = Join-Path $CacheDir 'package\package.json'
-if (-not (Test-Path $pkgJson)) {
-  Push-Location $CacheDir
-  $packOut = & npm pack $Package --pack-destination $CacheDir 2>&1
-  $tgz = Get-ChildItem $CacheDir -Filter '*.tgz' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $tgz) { Pop-Location; Fail ('npm pack failed: ' + ($packOut -join ' ')) }
-  $extract = Join-Path $CacheDir 'package'
-  if (-not (Test-Path $extract)) { New-Item -ItemType Directory -Force -Path $extract | Out-Null }
-  & tar -xzf $tgz.FullName -C $CacheDir 2>&1 | Out-Null
+# ---------- 3. fetch and verify package ----------
+Step ('fetching ' + $Package)
+$stage = Join-Path $CacheDir $version
+$marker = Join-Path $stage 'verified-integrity.txt'
+$pkgDir = Join-Path $stage 'package'
+
+$verified = (Test-Path (Join-Path $pkgDir 'package.json')) -and
+            (Test-Path $marker) -and
+            ((Get-Content $marker -Raw).Trim() -eq $ExpectedIntegrity)
+
+if ($verified) {
+  Ok 'cached copy already verified'
+} else {
+  if (-not (Test-Path $stage)) { New-Item -ItemType Directory -Force -Path $stage | Out-Null }
+  Push-Location $stage
+  # '--' stops npm from parsing the spec as an option
+  $packOut = & npm pack -- $Package --pack-destination $stage 2>&1
   Pop-Location
+  $tgz = Get-ChildItem $stage -Filter '*.tgz' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $tgz) { Fail ('npm pack failed: ' + ($packOut -join ' ')) }
+
+  $sha = [Security.Cryptography.SHA512]::Create()
+  $b64 = [Convert]::ToBase64String($sha.ComputeHash([IO.File]::ReadAllBytes($tgz.FullName)))
+  $actual = 'sha512-' + $b64
+  if ($actual -ne $ExpectedIntegrity) {
+    Fail ('integrity mismatch; refusing to run. expected=' + $ExpectedIntegrity + ' actual=' + $actual)
+  }
+  Ok 'tarball integrity verified'
+
+  & tar -xzf $tgz.FullName -C $stage 2>&1 | Out-Null
+  if (-not (Test-Path (Join-Path $pkgDir 'package.json'))) { Fail 'package extraction failed' }
+  [IO.File]::WriteAllText($marker, $ExpectedIntegrity, (New-Object Text.UTF8Encoding($false)))
 }
-if (-not (Test-Path $pkgJson)) { Fail 'package extraction failed' }
-$ver = (Get-Content $pkgJson -Raw | ConvertFrom-Json).version
-Ok ('language pack ' + $ver)
 
 # ---------- 4. version compatibility ----------
 Step 'checking version compatibility'
-$cfg = Get-Content (Join-Path $CacheDir 'package\config.json') -Raw | ConvertFrom-Json
+$cfg = Get-Content (Join-Path $pkgDir 'config.json') -Raw | ConvertFrom-Json
 $curVer = (Get-Content (Join-Path $CursorDir 'resources\app\product.json') -Raw | ConvertFrom-Json).version
-$verified = @($cfg.target.verifiedCursorVersions)
-if ($verified -contains $curVer) { Ok ('Cursor ' + $curVer + ' is in verified list') }
-else { Write-Host ('[WARN] Cursor ' + $curVer + ' not in verified list: ' + ($verified -join ', ')) }
+$verifiedList = @($cfg.target.verifiedCursorVersions)
+if ($verifiedList -contains $curVer) { Ok ('Cursor ' + $curVer + ' is in verified list') }
+else { Write-Host ('[WARN] Cursor ' + $curVer + ' not in verified list: ' + ($verifiedList -join ', ')) }
 
 # ---------- 5. remove conflicting official pack ----------
 Step 'removing conflicting official language pack'
@@ -72,8 +96,8 @@ if (Test-Path $cli) {
 
 # ---------- 6. run the installer with explicit vsix ----------
 Step 'applying translations'
-$script = Join-Path $CacheDir 'package\scripts\translate-install.mjs'
-$vsix   = Join-Path $CacheDir 'package\assets\language-pack.vsix'
+$script = Join-Path $pkgDir 'scripts\translate-install.mjs'
+$vsix   = Join-Path $pkgDir 'assets\language-pack.vsix'
 if (-not (Test-Path $script)) { Fail 'translate-install.mjs missing' }
 if (-not (Test-Path $vsix))   { Fail 'language-pack.vsix missing' }
 
@@ -91,8 +115,9 @@ if (Test-Path $argv) {
   $m = [regex]::Match((Get-Content $argv -Raw), '"locale"\s*:\s*"([^"]*)"')
   $locOk = ($m.Success -and $m.Groups[1].Value -eq $Locale)
 }
+$packState = Join-Path $env:USERPROFILE '.cursor\cursor-language-pack'
+$bk = Get-ChildItem $packState -Recurse -Directory -Filter 'backup' -ErrorAction SilentlyContinue | Select-Object -First 1
 $bkCount = 0
-$bk = Get-ChildItem (Join-Path $env:APPDATA 'Cursor') -Recurse -Directory -Filter 'backup' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($bk) { $bkCount = @(Get-ChildItem $bk.FullName -File -ErrorAction SilentlyContinue).Count }
 
 Write-Host ('   extension_installed=' + $packOk)
