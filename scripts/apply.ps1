@@ -48,16 +48,23 @@ Step ('fetching ' + $Package)
 $stage = Join-Path $CacheDir $version
 if (-not (Test-Path $stage)) { New-Item -ItemType Directory -Force -Path $stage | Out-Null }
 
-$tgz = Get-ChildItem $stage -Filter '*.tgz' -ErrorAction SilentlyContinue |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $tgz) {
-  Push-Location $stage
-  # options must come BEFORE '--'; everything after it is a package spec
-  $packOut = & npm pack --pack-destination $stage -- $Package 2>&1
-  Pop-Location
+# Prefer the copy vendored in this repository: no network access at all.
+$vendorTgz = Join-Path (Split-Path $PSScriptRoot -Parent) 'vendor\polang233-cursor-language-pack-1.2.0.tgz'
+if (Test-Path $vendorTgz) {
+  $tgz = Get-Item $vendorTgz
+  Ok ('using vendored package: ' + $tgz.Name)
+} else {
   $tgz = Get-ChildItem $stage -Filter '*.tgz' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $tgz) { Fail ('npm pack failed: ' + (($packOut | ForEach-Object { $_.ToString() }) -join ' ')) }
+  if (-not $tgz) {
+    Push-Location $stage
+    # options must come BEFORE '--'; everything after it is a package spec
+    $packOut = & npm pack --pack-destination $stage -- $Package 2>&1
+    Pop-Location
+    $tgz = Get-ChildItem $stage -Filter '*.tgz' -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $tgz) { Fail ('npm pack failed: ' + (($packOut | ForEach-Object { $_.ToString() }) -join ' ')) }
+  }
 }
 
 $hashAlg = [Security.Cryptography.SHA512]::Create()

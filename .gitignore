@@ -1,5 +1,6 @@
-# package archives and caches
+# package archives and caches (the vendored package is intentionally committed)
 *.tgz
+!vendor/*.tgz
 cache/
 node_modules/
 
