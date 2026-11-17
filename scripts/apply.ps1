@@ -24,6 +24,48 @@ function Fail($msg) { Write-Host ('[FAIL] ' + $msg); exit 1 }
 function Step($msg) { Write-Host ('[STEP] ' + $msg) }
 function Ok($msg)   { Write-Host ('[OK]   ' + $msg) }
 
+# Minimal .tgz extractor: gzip + tar, no npm and no external tar involved, so
+# nothing can pull transitive dependencies or be affected by path quirks of the
+# tar shipped with Git/MSYS. Rejects absolute paths and parent traversal.
+function Expand-Tgz([string]$tgzPath, [string]$destDir) {
+  $in = [IO.File]::OpenRead($tgzPath)
+  try {
+    $gz = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+    $ms = New-Object IO.MemoryStream
+    try { $gz.CopyTo($ms) } finally { $gz.Dispose() }
+  } finally { $in.Dispose() }
+  $data = $ms.ToArray()
+
+  $pos = 0
+  while ($pos + 512 -le $data.Length) {
+    $name = [Text.Encoding]::UTF8.GetString($data, $pos, 100).Trim([char]0)
+    if ([string]::IsNullOrWhiteSpace($name)) { break }
+    $sizeText = [Text.Encoding]::ASCII.GetString($data, $pos + 124, 12).Trim([char]0, ' ')
+    $size = if ($sizeText) { [Convert]::ToInt64($sizeText, 8) } else { 0 }
+    $type = [char]$data[$pos + 156]
+    $prefix = [Text.Encoding]::UTF8.GetString($data, $pos + 345, 155).Trim([char]0)
+    $rel = if ($prefix) { $prefix + '/' + $name } else { $name }
+    $rel = $rel -replace '\\', '/'
+
+    if ($rel -match '^/|^[A-Za-z]:|(^|/)\.\.(/|$)') { throw ('unsafe path in archive: ' + $rel) }
+
+    $pos += 512
+    $target = Join-Path $destDir ($rel -replace '/', '\')
+    if ($type -eq '5') {
+      New-Item -ItemType Directory -Force -Path $target | Out-Null
+    } elseif ($type -eq '0' -or $type -eq [char]0) {
+      $parent = Split-Path $target -Parent
+      if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+      if ($size -gt 0) {
+        $bytes = New-Object byte[] $size
+        [Array]::Copy($data, $pos, $bytes, 0, $size)
+        [IO.File]::WriteAllBytes($target, $bytes)
+      }
+    }
+    $pos += [int64]([math]::Ceiling($size / 512) * 512)
+  }
+}
+
 $version = ($Package -split '@')[-1]
 if ($version -notmatch '^\d+\.\d+\.\d+$') {
   Fail 'refusing an unpinned package spec; pass an exact version such as @polang233/cursor-language-pack@1.2.0'
@@ -77,20 +119,15 @@ Ok ('tarball integrity verified: ' + $tgz.Name)
 $runDir = Join-Path $stage ('run-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 
-# Extract with npm rather than tar: the tar shipped with Git/MSYS mis-parses
-# Windows paths ("Cannot connect to D:"). npm installs from the already-verified
-# local tarball and runs no scripts.
-$installOut = & npm install --prefix $runDir --no-save --ignore-scripts --no-audit --no-fund $tgz.FullName 2>&1
-if ($LASTEXITCODE -ne 0) {
-  Fail ('extraction failed (npm exit=' + $LASTEXITCODE + '): ' + (($installOut | ForEach-Object { $_.ToString() }) -join ' '))
+# Extract with the built-in .tgz reader. Using npm here would resolve a
+# dependency graph; a plain extraction cannot pull any additional code.
+try {
+  Expand-Tgz $tgz.FullName $runDir
+} catch {
+  Fail ('extraction failed: ' + $_.Exception.Message)
 }
-$pkgDir = $null
-$nm = Join-Path $runDir 'node_modules'
-if (Test-Path $nm) {
-  $found = Get-ChildItem $nm -Recurse -Directory -Filter 'cursor-language-pack' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($found) { $pkgDir = $found.FullName }
-}
-if (-not $pkgDir -or -not (Test-Path (Join-Path $pkgDir 'package.json'))) { Fail 'package extraction failed' }
+$pkgDir = Join-Path $runDir 'package'
+if (-not (Test-Path (Join-Path $pkgDir 'package.json'))) { Fail 'package extraction failed' }
 Ok ('extracted into a fresh directory for this run: ' + $pkgDir)
 
 # ---------- 3. version compatibility (read-only) ----------
